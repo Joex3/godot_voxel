@@ -828,117 +828,68 @@ void VoxelToolLodTerrain::do_graph(Ref<VoxelGeneratorGraph> graph, Transform3D t
 	ZN_DSTACK();
 	ERR_FAIL_COND(_terrain == nullptr);
 
-	const Vector3 area_size = math::abs(transform.basis.xform(graph_base_size));
+	// First, create a bounding box that encompasses the transformed graph_base_size.
+	// clang-format off
+	AABB destination_aabb =
+		AABB(
+			transform.xform(Vector3(-graph_base_size.x / 2, -graph_base_size.y / 2, -graph_base_size.z / 2)),
+			Vector3()
+		)
+		.expand(transform.xform(Vector3(graph_base_size.x / 2, -graph_base_size.y / 2, -graph_base_size.z / 2)))
+		.expand(transform.xform(Vector3(-graph_base_size.x / 2, graph_base_size.y / 2, -graph_base_size.z / 2)))
+		.expand(transform.xform(Vector3(graph_base_size.x / 2, graph_base_size.y / 2, -graph_base_size.z / 2)))
+		.expand(transform.xform(Vector3(-graph_base_size.x / 2, -graph_base_size.y / 2, graph_base_size.z / 2)))
+		.expand(transform.xform(Vector3(graph_base_size.x / 2, -graph_base_size.y / 2, graph_base_size.z / 2)))
+		.expand(transform.xform(Vector3(-graph_base_size.x / 2, graph_base_size.y / 2, graph_base_size.z / 2)))
+		.expand(transform.xform(Vector3(graph_base_size.x / 2, graph_base_size.y / 2, graph_base_size.z / 2)));
+	// clang-format on
 
-	const Box3i box = Box3i::from_min_max( //
-			math::floor_to_int(transform.origin - 0.5 * area_size),
-			math::ceil_to_int(transform.origin + 0.5 * area_size))
-							  .padded(2)
-							  .clipped(_terrain->get_voxel_bounds());
+	destination_aabb.position = destination_aabb.position.floor();
+	destination_aabb.size = destination_aabb.size.ceil();
 
-	if (!is_area_editable(box)) {
-		ZN_PRINT_VERBOSE("Area not editable");
-		return;
-	}
+	// Then, create a buffer with all required data inside this bounding box.
+	Ref<gd::VoxelBuffer> buffer_godot = memnew(gd::VoxelBuffer);
+	VoxelBufferInternal &buffer = buffer_godot->get_buffer();
+	buffer.create(destination_aabb.size);
+	copy(destination_aabb.position, buffer, 1 << VoxelBufferInternal::CHANNEL_SDF);
 
-	VoxelData &data = _terrain->get_storage();
-
-	data.pre_generate_box(box);
-
-	const unsigned int channel_index = VoxelBufferInternal::CHANNEL_SDF;
-
-	VoxelBufferInternal buffer;
-	buffer.create(box.size);
-	data.copy(box.pos, buffer, 1 << channel_index);
-
-	buffer.decompress_channel(channel_index);
-
-	// Convert input SDF
-	static thread_local std::vector<float> tls_in_sdf_full;
-	tls_in_sdf_full.resize(Vector3iUtil::get_volume(buffer.get_size()));
-	Span<float> in_sdf_full = to_span(tls_in_sdf_full);
-	get_unscaled_sdf(buffer, in_sdf_full);
-
-	static thread_local std::vector<float> tls_in_x;
-	static thread_local std::vector<float> tls_in_y;
-	static thread_local std::vector<float> tls_in_z;
-	const unsigned int deck_area = box.size.x * box.size.y;
-	tls_in_x.resize(deck_area);
-	tls_in_y.resize(deck_area);
-	tls_in_z.resize(deck_area);
-	Span<float> in_x = to_span(tls_in_x);
-	Span<float> in_y = to_span(tls_in_y);
-	Span<float> in_z = to_span(tls_in_z);
-
-	const Transform3D inv_transform = transform.affine_inverse();
-
-	const int output_sdf_buffer_index = graph->get_sdf_output_port_address();
-	ZN_ASSERT_RETURN_MSG(output_sdf_buffer_index != -1, "The graph has no SDF output, cannot use it as a brush");
-
-	// The graph works at a fixed dimension, so if we scale the operation with the Transform3D then we have to also
-	// scale the distance field the graph is working at
-	const float graph_scale = transform.basis.get_scale().length();
-	const float inv_graph_scale = 1.f / graph_scale;
-
-	for (unsigned int i = 0; i < in_sdf_full.size(); ++i) {
-		in_sdf_full[i] *= inv_graph_scale;
-	}
-
-	const float op_strength = get_sdf_strength();
-
-	{
-		ZN_PROFILE_SCOPE_NAMED("Slices");
-		// For each deck of the box (doing this to reduce memory usage since the graph will allocate temporary buffers
-		// for each operation, which can be a lot depending on the complexity of the graph)
-		Vector3i pos;
-		const Vector3i endpos = box.pos + box.size;
-		for (pos.z = box.pos.z; pos.z < endpos.z; ++pos.z) {
-			// Set positions
-			for (unsigned int i = 0; i < deck_area; ++i) {
-				in_z[i] = pos.z;
-			}
-			{
-				unsigned int i = 0;
-				for (pos.x = box.pos.x; pos.x < endpos.x; ++pos.x) {
-					for (pos.y = box.pos.y; pos.y < endpos.y; ++pos.y) {
-						in_x[i] = pos.x;
-						in_y[i] = pos.y;
-						++i;
-					}
-				}
-			}
-
-			// Transform positions to be local to the graph
-			for (unsigned int i = 0; i < deck_area; ++i) {
-				Vector3 graph_local_pos(in_x[i], in_y[i], in_z[i]);
-				graph_local_pos = inv_transform.xform(pos);
-				in_x[i] = graph_local_pos.x;
-				in_y[i] = graph_local_pos.y;
-				in_z[i] = graph_local_pos.z;
-			}
-
-			// Get SDF input
-			Span<float> in_sdf = in_sdf_full.sub(deck_area * (pos.z - box.pos.z), deck_area);
-
-			// Run graph
-			graph->generate_series(in_x, in_y, in_z, in_sdf);
-
-			// Read result
-			const pg::Runtime::State &state = VoxelGeneratorGraph::get_last_state_from_current_thread();
-			const pg::Runtime::Buffer &graph_buffer = state.get_buffer(output_sdf_buffer_index);
-
-			// Apply strength and graph scale. Input serves as output too, shouldn't overlap
-			for (unsigned int i = 0; i < in_sdf.size(); ++i) {
-				in_sdf[i] = Math::lerp(in_sdf[i], graph_buffer.data[i] * graph_scale, op_strength);
+	const float s = buffer.get_size().x * buffer.get_size().y * buffer.get_size().z;
+	std::vector<float> in_x(s), in_y(s), in_z(s), in_sdf(s);
+	Vector3 source_position;
+	const Transform3D transform_inverse = transform.affine_inverse();
+	int i = 0;
+	for (int z = 0; z < destination_aabb.size.z; z++) {
+		for (int x = 0; x < destination_aabb.size.x; x++) {
+			for (int y = 0; y < destination_aabb.size.y; y++) {
+				source_position = transform_inverse.xform(destination_aabb.position + Vector3(x, y, z));
+				in_x[i] = source_position.x;
+				in_y[i] = source_position.y;
+				in_z[i] = source_position.z;
+				in_sdf[i] = buffer.get_voxel_f(Vector3(x, y, z), VoxelBufferInternal::CHANNEL_SDF);
+				i++;
 			}
 		}
 	}
 
-	scale_and_store_sdf(buffer, in_sdf_full);
+	// Then, apply the actual graph inside the temporary buffer.
+	graph->generate_series(to_span(in_x), to_span(in_y), to_span(in_z), to_span(in_sdf));
 
-	data.paste(box.pos, buffer, 1 << channel_index, false);
+	// Finally, copy all data back to the terrain.
+	const int output_sdf_buffer_index = graph->get_sdf_output_port_address();
+	const pg::Runtime::State &state = VoxelGeneratorGraph::get_last_state_from_current_thread();
+	const pg::Runtime::Buffer &graph_buffer = state.get_buffer(output_sdf_buffer_index);
 
-	_post_edit(box);
+	i = 0;
+	for (int z = 0; z < destination_aabb.size.z; z++) {
+		for (int x = 0; x < destination_aabb.size.x; x++) {
+			for (int y = 0; y < destination_aabb.size.y; y++) {
+				buffer.set_voxel_f(graph_buffer.data[i], Vector3(x, y, z), VoxelBufferInternal::CHANNEL_SDF);
+				i++;
+			}
+		}
+	}
+
+	paste(destination_aabb.position, buffer_godot, 1 << VoxelBufferInternal::CHANNEL_SDF);
 }
 
 void VoxelToolLodTerrain::_bind_methods() {
