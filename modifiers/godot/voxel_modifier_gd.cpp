@@ -4,6 +4,10 @@
 #include "../../util/math/conv.h"
 #include "../voxel_modifier_sdf.h"
 
+#ifdef TOOLS_ENABLED
+#include "../../util/godot/core/packed_arrays.h"
+#endif
+
 namespace zylann::voxel::gd {
 
 VoxelModifier::VoxelModifier() {

@@ -26,6 +26,7 @@ class VoxelTool;
 class VoxelInstancer;
 class VoxelSaveCompletionTracker;
 class VoxelTerrainMultiplayerSynchronizer;
+class BufferedTaskScheduler;
 
 // Infinite paged terrain made of voxel blocks all with the same level of detail.
 // Voxels are polygonized around the viewer by distance in a large cubic space.
@@ -220,8 +221,8 @@ private:
 	void save_all_modified_blocks(bool with_copy, std::shared_ptr<AsyncDependencyTracker> tracker);
 	void get_viewer_pos_and_direction(Vector3 &out_pos, Vector3 &out_direction) const;
 	void send_data_load_requests();
-	void consume_block_data_save_requests(
-			BufferedTaskScheduler &task_scheduler, std::shared_ptr<AsyncDependencyTracker> saving_tracker);
+	void consume_block_data_save_requests(BufferedTaskScheduler &task_scheduler,
+			std::shared_ptr<AsyncDependencyTracker> saving_tracker, bool with_flush);
 
 	void emit_data_block_loaded(Vector3i bpos);
 	void emit_data_block_unloaded(Vector3i bpos);
@@ -316,6 +317,16 @@ private:
 	// Blocks that should be saved on the next process call.
 	// The order in that list does not matter.
 	std::vector<VoxelData::BlockToSave> _blocks_to_save;
+	// Data blocks that have been unloaded and needed saving. They are temporarily stored here until saving completes,
+	// and is checked first before loading new blocks. This is in case players leave an area and come back to it faster
+	// than saving, because otherwise loading from stream would return an outdated version.
+	std::unordered_map<Vector3i, std::shared_ptr<VoxelBufferInternal>> _unloaded_saving_blocks;
+	// List of data blocks that will be used to simulate a loading response on the next process call.
+	struct QuickReloadingBlock {
+		std::shared_ptr<VoxelBufferInternal> voxels;
+		Vector3i position;
+	};
+	std::vector<QuickReloadingBlock> _quick_reloading_blocks;
 
 	Ref<VoxelMesher> _mesher;
 

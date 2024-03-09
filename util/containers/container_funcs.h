@@ -173,6 +173,24 @@ bool find(Span<const T> items, const T &v, size_t &out_index) {
 	return false;
 }
 
+template <typename T, typename TPredicate>
+bool find(Span<const T> items, size_t &out_index, TPredicate predicate) {
+	unsigned int i = 0;
+	for (const T &item : items) {
+		if (predicate(item)) {
+			out_index = i;
+			return true;
+		}
+		++i;
+	}
+	return false;
+}
+
+template <typename T, typename TPredicate>
+bool find(const std::vector<T> &vec, size_t &out_index, TPredicate predicate) {
+	return find(to_span_const(vec), out_index, predicate);
+}
+
 template <typename T>
 bool contains(Span<const T> items, const T &v) {
 	for (const T &item : items) {
@@ -181,6 +199,21 @@ bool contains(Span<const T> items, const T &v) {
 		}
 	}
 	return false;
+}
+
+template <typename T, typename TPredicate>
+bool contains(Span<const T> items, TPredicate predicate) {
+	for (const T &item : items) {
+		if (predicate(item)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+template <typename T, typename TPredicate>
+bool contains(const std::vector<T> &vec, TPredicate predicate) {
+	return contains(to_span_const(vec), predicate);
 }
 
 } // namespace zylann

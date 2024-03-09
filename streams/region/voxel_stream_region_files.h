@@ -51,6 +51,8 @@ public:
 
 	void convert_files(Dictionary d);
 
+	void flush() override;
+
 protected:
 	static void _bind_methods();
 
@@ -64,8 +66,8 @@ private:
 		EMERGE_FAILED
 	};
 
-	EmergeResult _load_block(VoxelBufferInternal &out_buffer, Vector3i origin_in_voxels, int lod);
-	void _save_block(VoxelBufferInternal &voxel_buffer, Vector3i origin_in_voxels, int lod);
+	EmergeResult _load_block(VoxelBufferInternal &out_buffer, Vector3i block_pos, int lod);
+	void _save_block(VoxelBufferInternal &voxel_buffer, Vector3i block_pos, int lod);
 
 	FileResult save_meta();
 	FileResult load_meta();
@@ -97,13 +99,13 @@ private:
 		// operator<
 		_FORCE_INLINE_ bool operator()(
 				const VoxelStream::VoxelQueryData &a, const VoxelStream::VoxelQueryData &b) const {
-			if (a.lod < b.lod) {
+			if (a.lod_index < b.lod_index) {
 				return true;
-			} else if (a.lod > b.lod) {
+			} else if (a.lod_index > b.lod_index) {
 				return false;
 			}
-			Vector3i bpos_a = self->get_block_position_from_voxels(a.origin_in_voxels);
-			Vector3i bpos_b = self->get_block_position_from_voxels(b.origin_in_voxels);
+			Vector3i bpos_a = a.position_in_blocks;
+			Vector3i bpos_b = b.position_in_blocks;
 			Vector3i rpos_a = self->get_region_position_from_blocks(bpos_a);
 			Vector3i rpos_b = self->get_region_position_from_blocks(bpos_b);
 			return rpos_a < rpos_b;

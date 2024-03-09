@@ -15,9 +15,9 @@
 
 #ifdef TOOLS_ENABLED
 #include "../../editor/voxel_debug.h"
+#include "../../util/godot/core/version.h"
 #endif
 
-//#include <scene/resources/material.h> // Included by node.h lol
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,6 +38,8 @@ class VoxelInstanceLibrarySceneItem;
 class VoxelTool;
 class SaveBlockDataTask;
 class BufferedTaskScheduler;
+struct InstanceBlockData;
+struct VoxelInstancerQuickReloadingCache;
 
 // Note: a large part of this node could be made generic to support the sole idea of instancing within octants?
 // Even nodes like gridmaps could be rebuilt on top of this, if its concept of "grid" was decoupled.
@@ -69,11 +71,13 @@ public:
 
 	// Actions
 
-	void save_all_modified_blocks(BufferedTaskScheduler &tasks, std::shared_ptr<AsyncDependencyTracker> tracker);
+	void save_all_modified_blocks(
+			BufferedTaskScheduler &tasks, std::shared_ptr<AsyncDependencyTracker> tracker, bool with_flush);
 
 	// Event handlers
 
-	void on_data_block_loaded(Vector3i grid_position, unsigned int lod_index, UniquePtr<InstanceBlockData> instances);
+	// void on_data_block_loaded(Vector3i grid_position, unsigned int lod_index, UniquePtr<InstanceBlockData>
+	// instances);
 	void on_mesh_block_enter(Vector3i render_grid_position, unsigned int lod_index, Array surface_arrays);
 	void on_mesh_block_exit(Vector3i render_grid_position, unsigned int lod_index);
 	void on_area_edited(Box3i p_voxel_box);
@@ -81,12 +85,13 @@ public:
 	void on_scene_instance_removed(
 			Vector3i data_block_position, unsigned int render_block_index, unsigned int instance_index);
 	void on_scene_instance_modified(Vector3i data_block_position, unsigned int render_block_index);
+	void on_data_block_saved(Vector3i data_grid_position, unsigned int lod_index);
 
 	// Internal properties
 
 	void set_mesh_block_size_po2(unsigned int p_mesh_block_size_po2);
 	void set_data_block_size_po2(unsigned int p_data_block_size_po2);
-	void set_mesh_lod_distance(float p_lod_distance);
+	void update_mesh_lod_distances_from_parent();
 
 	int get_library_item_id_from_render_block_index(unsigned render_block_index) const;
 
@@ -127,7 +132,7 @@ private:
 	struct Layer;
 
 	void process();
-	void process_generator_results();
+	void process_task_results();
 	void process_mesh_lods();
 
 	void add_layer(int layer_id, int lod_index);
@@ -139,8 +144,8 @@ private:
 	void clear_blocks_in_layer(int layer_id);
 	void clear_layers();
 	void update_visibility();
-	SaveBlockDataTask *save_block(
-			Vector3i data_grid_pos, int lod_index, std::shared_ptr<AsyncDependencyTracker> tracker) const;
+	SaveBlockDataTask *save_block(Vector3i data_grid_pos, int lod_index,
+			std::shared_ptr<AsyncDependencyTracker> tracker, bool with_flush, bool cache_while_saving);
 
 	// Get a layer assuming it exists
 	Layer &get_layer(int id);
@@ -195,6 +200,7 @@ private:
 		uint8_t lod_index = 0;
 		// If true, the block is waiting to be populated asynchronously. We create blocks in this state so when async
 		// generation completes, we can check if the block is still present.
+		// TODO Unused?
 		bool pending_instances = false;
 		// Position in mesh block coordinate system
 		Vector3i grid_position;
@@ -241,7 +247,13 @@ private:
 		// it will get generated instances.
 		// Keys follows the data block coordinate system.
 		// Can't use Godot's `HashMap` because it lacks move semantics.
-		std::unordered_map<Vector3i, UniquePtr<InstanceBlockData>> loaded_instances_data;
+		// std::unordered_map<Vector3i, UniquePtr<InstanceBlockData>> loaded_instances_data;
+
+		// Blocks that contain edited data (not generated).
+		// Keys follows the data block coordinate system.
+		std::unordered_set<Vector3i> edited_data_blocks;
+
+		std::shared_ptr<VoxelInstancerQuickReloadingCache> quick_reload_cache;
 
 		// FixedArray<MeshLodDistances, VoxelInstanceLibraryMultiMeshItem::MAX_MESH_LODS> mesh_lod_distances;
 	};
@@ -261,12 +273,12 @@ private:
 	VoxelNode *_parent = nullptr;
 	unsigned int _parent_data_block_size_po2 = constants::DEFAULT_BLOCK_SIZE_PO2;
 	unsigned int _parent_mesh_block_size_po2 = constants::DEFAULT_BLOCK_SIZE_PO2;
-	float _mesh_lod_distance = 0.f;
+	FixedArray<float, MAX_LOD> _mesh_lod_distances;
 	// Vector3 _mesh_lod_last_update_camera_position;
 	// float _mesh_lod_update_camera_threshold_distance = 8.f;
 	unsigned int _mesh_lod_time_sliced_block_index = 0;
 
-	std::shared_ptr<VoxelInstancerGeneratorTaskOutputQueue> _generator_results;
+	std::shared_ptr<VoxelInstancerTaskOutputQueue> _loading_results;
 
 #ifdef TOOLS_ENABLED
 	DebugRenderer _debug_renderer;

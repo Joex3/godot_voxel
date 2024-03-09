@@ -6,6 +6,10 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef TOOLS_ENABLED
+#include "../../util/godot/core/version.h"
+#endif
+
 namespace zylann::voxel {
 
 class VoxelTerrain;

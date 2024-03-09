@@ -6,6 +6,10 @@
 #include "../util/godot/classes/script.h"
 #include "../util/godot/core/string.h"
 
+#ifdef TOOLS_ENABLED
+#include "../util/godot/core/packed_arrays.h"
+#endif
+
 namespace zylann::voxel {
 
 void VoxelNode::set_mesher(Ref<VoxelMesher> mesher) {

@@ -319,7 +319,7 @@ Ref<Image> VoxelBuffer::debug_print_sdf_z_slice(const VoxelBufferInternal &buffe
 			const float posi = math::clamp(sd, 0.0f, 1.0f);
 			const Color col = math::lerp(black, nega_col, nega) + math::lerp(black, posi_col, posi);
 
-			im->set_pixel(x, y, col);
+			im->set_pixel(x, res.y - y - 1, col);
 		}
 	}
 
@@ -330,8 +330,8 @@ Ref<Image> VoxelBuffer::debug_print_sdf_y_slice(float scale, int y) const {
 	return debug_print_sdf_y_slice(*_buffer, scale, y);
 }
 
-Array VoxelBuffer::debug_print_sdf_y_slices(float scale) const {
-	Array images;
+TypedArray<Image> VoxelBuffer::debug_print_sdf_y_slices(float scale) const {
+	TypedArray<Image> images;
 
 	const VoxelBufferInternal &buffer = *_buffer;
 	const Vector3i res = buffer.get_size();
@@ -392,7 +392,8 @@ void VoxelBuffer::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("copy_voxel_metadata_in_area", "src_buffer", "src_min_pos", "src_max_pos", "dst_min_pos"),
 			&VoxelBuffer::copy_voxel_metadata_in_area);
-	ClassDB::bind_method(D_METHOD("debug_print_sdf_y_slices", "scale"), &VoxelBuffer::debug_print_sdf_y_slices);
+	ClassDB::bind_method(
+			D_METHOD("debug_print_sdf_y_slices", "scale"), &VoxelBuffer::debug_print_sdf_y_slices, DEFVAL(1.0));
 
 	BIND_ENUM_CONSTANT(CHANNEL_TYPE);
 	BIND_ENUM_CONSTANT(CHANNEL_SDF);

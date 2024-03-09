@@ -84,7 +84,7 @@ void VoxelStreamRegionFiles::load_voxel_blocks(Span<VoxelStream::VoxelQueryData>
 	for (unsigned int i = 0; i < sorted_block_indices.size(); ++i) {
 		const unsigned int bi = sorted_block_indices[i];
 		VoxelStream::VoxelQueryData &q = p_blocks[bi];
-		const EmergeResult result = _load_block(q.voxel_buffer, q.origin_in_voxels, q.lod);
+		const EmergeResult result = _load_block(q.voxel_buffer, q.position_in_blocks, q.lod_index);
 		switch (result) {
 			case EMERGE_OK:
 				q.result = RESULT_BLOCK_FOUND;
@@ -114,7 +114,7 @@ void VoxelStreamRegionFiles::save_voxel_blocks(Span<VoxelStream::VoxelQueryData>
 	for (unsigned int i = 0; i < sorted_block_indices.size(); ++i) {
 		const unsigned int bi = sorted_block_indices[i];
 		VoxelStream::VoxelQueryData &q = p_blocks[bi];
-		_save_block(q.voxel_buffer, q.origin_in_voxels, q.lod);
+		_save_block(q.voxel_buffer, q.position_in_blocks, q.lod_index);
 	}
 }
 
@@ -124,7 +124,7 @@ int VoxelStreamRegionFiles::get_used_channels_mask() const {
 }
 
 VoxelStreamRegionFiles::EmergeResult VoxelStreamRegionFiles::_load_block(
-		VoxelBufferInternal &out_buffer, Vector3i origin_in_voxels, int lod) {
+		VoxelBufferInternal &out_buffer, Vector3i block_pos, int lod) {
 	ZN_PROFILE_SCOPE();
 
 	MutexLock lock(_mutex);
@@ -154,7 +154,6 @@ VoxelStreamRegionFiles::EmergeResult VoxelStreamRegionFiles::_load_block(
 		out_buffer.set_channel_depth(channel_index, _meta.channel_depths[channel_index]);
 	}
 
-	const Vector3i block_pos = get_block_position_from_voxels(origin_in_voxels) >> lod;
 	const Vector3i region_pos = get_region_position_from_blocks(block_pos);
 
 	CachedRegion *cache = open_region(region_pos, lod, false);
@@ -177,7 +176,7 @@ VoxelStreamRegionFiles::EmergeResult VoxelStreamRegionFiles::_load_block(
 	}
 }
 
-void VoxelStreamRegionFiles::_save_block(VoxelBufferInternal &voxel_buffer, Vector3i origin_in_voxels, int lod) {
+void VoxelStreamRegionFiles::_save_block(VoxelBufferInternal &voxel_buffer, Vector3i block_pos, int lod) {
 	ZN_PROFILE_SCOPE();
 
 	MutexLock lock(_mutex);
@@ -213,7 +212,6 @@ void VoxelStreamRegionFiles::_save_block(VoxelBufferInternal &voxel_buffer, Vect
 	}
 
 	const Vector3i region_size = Vector3iUtil::create(1 << _meta.region_size_po2);
-	Vector3i block_pos = get_block_position_from_voxels(origin_in_voxels) >> lod;
 	Vector3i region_pos = get_region_position_from_blocks(block_pos);
 	Vector3i block_rpos = math::wrap(block_pos, region_size);
 
@@ -604,7 +602,7 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 
 	struct PositionAndLod {
 		Vector3i position;
-		int lod;
+		uint8_t lod_index;
 	};
 
 	ERR_FAIL_COND(old_stream->load_meta() != FILE_OK);
@@ -614,9 +612,9 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 
 	// Get list of all regions from the old stream
 	{
-		for (int lod = 0; lod < old_meta.lod_count; ++lod) {
+		for (unsigned int lod_index = 0; lod_index < old_meta.lod_count; ++lod_index) {
 			const String lod_folder =
-					old_stream->_directory_path.path_join("regions").path_join("lod") + String::num_int64(lod);
+					old_stream->_directory_path.path_join("regions").path_join("lod") + String::num_int64(lod_index);
 			const String ext = String(".") + RegionFormat::FILE_EXTENSION;
 
 			Ref<DirAccess> da = open_directory(lod_folder);
@@ -643,7 +641,7 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 					p.position.x = parts[1].to_int();
 					p.position.y = parts[2].to_int();
 					p.position.z = parts[3].to_int();
-					p.lod = lod;
+					p.lod_index = lod_index;
 					old_region_list.push_back(p);
 				}
 			}
@@ -665,12 +663,12 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 	for (unsigned int i = 0; i < old_region_list.size(); ++i) {
 		PositionAndLod region_info = old_region_list[i];
 
-		const CachedRegion *old_region = old_stream->open_region(region_info.position, region_info.lod, false);
+		const CachedRegion *old_region = old_stream->open_region(region_info.position, region_info.lod_index, false);
 		if (old_region == nullptr) {
 			continue;
 		}
 
-		ZN_PRINT_VERBOSE(format("Converting region lod{}/{}", region_info.lod, region_info.position));
+		ZN_PRINT_VERBOSE(format("Converting region lod{}/{}", region_info.lod_index, region_info.position));
 
 		const unsigned int blocks_count = old_region->region.get_header_block_count();
 		for (unsigned int j = 0; j < blocks_count; ++j) {
@@ -689,8 +687,8 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 			Vector3i block_pos = block_rpos + region_info.position * old_region_size;
 			VoxelStream::VoxelQueryData old_block_load_query{
 				old_block, //
-				block_pos * old_block_size << region_info.lod, //
-				region_info.lod, //
+				block_pos, //
+				region_info.lod_index, //
 				RESULT_ERROR //
 			};
 			old_stream->load_voxel_block(old_block_load_query);
@@ -699,8 +697,8 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 			if (old_block_size == new_block_size) {
 				VoxelStream::VoxelQueryData old_block_save_query{
 					old_block, //
-					block_pos * new_block_size << region_info.lod, //
-					region_info.lod,
+					block_pos, //
+					region_info.lod_index,
 					RESULT_ERROR //
 				};
 				save_voxel_block(old_block_save_query);
@@ -716,8 +714,8 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 					// Copy to a sub-area of one block
 					VoxelStream::VoxelQueryData new_block_load_query{ //
 						new_block, //
-						new_block_pos * new_block_size << region_info.lod, //
-						region_info.lod, //
+						new_block_pos, //
+						region_info.lod_index, //
 						RESULT_ERROR
 					};
 					load_voxel_block(new_block_load_query);
@@ -732,8 +730,8 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 					new_block.compress_uniform_channels();
 					VoxelStream::VoxelQueryData new_block_save_query{ //
 						new_block, //
-						new_block_pos * new_block_size << region_info.lod, //
-						region_info.lod, //
+						new_block_pos, //
+						region_info.lod_index, //
 						RESULT_ERROR
 					};
 					save_voxel_block(new_block_save_query);
@@ -756,8 +754,8 @@ void VoxelStreamRegionFiles::_convert_files(Meta new_meta) {
 
 								VoxelStream::VoxelQueryData new_block_save_query{ //
 									new_block, //
-									(new_block_pos + rpos) * new_block_size << region_info.lod, //
-									region_info.lod, //
+									new_block_pos + rpos, //
+									region_info.lod_index, //
 									RESULT_ERROR
 								};
 								save_voxel_block(new_block_save_query);
@@ -898,6 +896,14 @@ void VoxelStreamRegionFiles::convert_files(Dictionary d) {
 	}
 
 	emit_changed();
+}
+
+void VoxelStreamRegionFiles::flush() {
+	ZN_PROFILE_SCOPE();
+	MutexLock lock(_mutex);
+	for (CachedRegion *cr : _region_cache) {
+		cr->region.flush();
+	}
 }
 
 void VoxelStreamRegionFiles::_bind_methods() {

@@ -660,9 +660,9 @@ void VoxelStreamSQLite::set_database_path(String path) {
 	}
 	if (!_connection_path.is_empty() && _cache.get_indicative_block_count() > 0) {
 		// Save cached data before changing the path.
-		// Not using get_connection() because it locks.
+		// Not using get_connection() because it locks, we are already locked.
 		VoxelStreamSQLiteInternal con;
-		const CharString cpath = path.utf8();
+		const CharString cpath = _connection_path.utf8();
 		// Note, the path could be invalid,
 		// Since Godot helpfully sets the property for every character typed in the inspector.
 		// So there can be lots of errors in the editor if you type it.
@@ -675,6 +675,7 @@ void VoxelStreamSQLite::set_database_path(String path) {
 	}
 	_block_keys_cache.clear();
 	_connection_pool.clear();
+
 	_connection_path = path;
 	// Don't actually open anything here. We'll do it only when necessary
 }
@@ -695,23 +696,20 @@ void VoxelStreamSQLite::save_voxel_block(VoxelStream::VoxelQueryData &q) {
 void VoxelStreamSQLite::load_voxel_blocks(Span<VoxelStream::VoxelQueryData> p_blocks) {
 	ZN_PROFILE_SCOPE();
 
-	// TODO Get block size from database
-	const int bs_po2 = constants::DEFAULT_BLOCK_SIZE_PO2;
-
 	// Check the cache first
 	std::vector<unsigned int> blocks_to_load;
 	for (unsigned int i = 0; i < p_blocks.size(); ++i) {
 		VoxelStream::VoxelQueryData &q = p_blocks[i];
-		const Vector3i pos = q.origin_in_voxels >> (bs_po2 + q.lod);
+		const Vector3i pos = q.position_in_blocks;
 
 		ZN_ASSERT_CONTINUE(can_convert_to_i16(pos));
 
-		if (_block_keys_cache_enabled && !_block_keys_cache.contains(to_vec3i16(pos), q.lod)) {
+		if (_block_keys_cache_enabled && !_block_keys_cache.contains(to_vec3i16(pos), q.lod_index)) {
 			q.result = RESULT_BLOCK_NOT_FOUND;
 			continue;
 		}
 
-		if (_cache.load_voxel_block(pos, q.lod, q.voxel_buffer)) {
+		if (_cache.load_voxel_block(pos, q.lod_index, q.voxel_buffer)) {
 			q.result = RESULT_BLOCK_FOUND;
 
 		} else {
@@ -734,13 +732,11 @@ void VoxelStreamSQLite::load_voxel_blocks(Span<VoxelStream::VoxelQueryData> p_bl
 		const unsigned int ri = blocks_to_load[i];
 		VoxelStream::VoxelQueryData &q = p_blocks[ri];
 
-		const unsigned int po2 = bs_po2 + q.lod;
-
 		BlockLocation loc;
-		loc.x = q.origin_in_voxels.x >> po2;
-		loc.y = q.origin_in_voxels.y >> po2;
-		loc.z = q.origin_in_voxels.z >> po2;
-		loc.lod = q.lod;
+		loc.x = q.position_in_blocks.x;
+		loc.y = q.position_in_blocks.y;
+		loc.z = q.position_in_blocks.z;
+		loc.lod = q.lod_index;
 
 		std::vector<uint8_t> &temp_block_data = get_tls_temp_block_data();
 
@@ -760,22 +756,19 @@ void VoxelStreamSQLite::load_voxel_blocks(Span<VoxelStream::VoxelQueryData> p_bl
 }
 
 void VoxelStreamSQLite::save_voxel_blocks(Span<VoxelStream::VoxelQueryData> p_blocks) {
-	// TODO Get block size from database
-	const int bs_po2 = constants::DEFAULT_BLOCK_SIZE_PO2;
-
 	// First put in cache
 	for (unsigned int i = 0; i < p_blocks.size(); ++i) {
 		VoxelStream::VoxelQueryData &q = p_blocks[i];
-		const Vector3i pos = q.origin_in_voxels >> (bs_po2 + q.lod);
+		const Vector3i pos = q.position_in_blocks;
 
-		if (!BlockLocation::validate(pos, q.lod)) {
+		if (!BlockLocation::validate(pos, q.lod_index)) {
 			ERR_PRINT(String("Block position {0} is outside of supported range").format(varray(pos)));
 			continue;
 		}
 
-		_cache.save_voxel_block(pos, q.lod, q.voxel_buffer);
+		_cache.save_voxel_block(pos, q.lod_index, q.voxel_buffer);
 		if (_block_keys_cache_enabled) {
-			_block_keys_cache.add(to_vec3i16(pos), q.lod);
+			_block_keys_cache.add(to_vec3i16(pos), q.lod_index);
 		}
 	}
 
@@ -800,7 +793,7 @@ void VoxelStreamSQLite::load_instance_blocks(Span<VoxelStream::InstancesQueryDat
 	for (size_t i = 0; i < out_blocks.size(); ++i) {
 		VoxelStream::InstancesQueryData &q = out_blocks[i];
 
-		if (_cache.load_instance_block(q.position, q.lod, q.data)) {
+		if (_cache.load_instance_block(q.position_in_blocks, q.lod_index, q.data)) {
 			q.result = RESULT_BLOCK_FOUND;
 
 		} else {
@@ -825,10 +818,10 @@ void VoxelStreamSQLite::load_instance_blocks(Span<VoxelStream::InstancesQueryDat
 		VoxelStream::InstancesQueryData &q = out_blocks[ri];
 
 		BlockLocation loc;
-		loc.x = q.position.x;
-		loc.y = q.position.y;
-		loc.z = q.position.z;
-		loc.lod = q.lod;
+		loc.x = q.position_in_blocks.x;
+		loc.y = q.position_in_blocks.y;
+		loc.z = q.position_in_blocks.z;
+		loc.lod = q.lod_index;
 
 		std::vector<uint8_t> &temp_compressed_block_data = get_tls_temp_compressed_block_data();
 
@@ -866,14 +859,14 @@ void VoxelStreamSQLite::save_instance_blocks(Span<VoxelStream::InstancesQueryDat
 	for (size_t i = 0; i < p_blocks.size(); ++i) {
 		VoxelStream::InstancesQueryData &q = p_blocks[i];
 
-		if (!BlockLocation::validate(q.position, q.lod)) {
-			ZN_PRINT_ERROR(format("Instance block position {} is outside of supported range", q.position));
+		if (!BlockLocation::validate(q.position_in_blocks, q.lod_index)) {
+			ZN_PRINT_ERROR(format("Instance block position {} is outside of supported range", q.position_in_blocks));
 			continue;
 		}
 
-		_cache.save_instance_block(q.position, q.lod, std::move(q.data));
+		_cache.save_instance_block(q.position_in_blocks, q.lod_index, std::move(q.data));
 		if (_block_keys_cache_enabled) {
-			_block_keys_cache.add(to_vec3i16(q.position), q.lod);
+			_block_keys_cache.add(to_vec3i16(q.position_in_blocks), q.lod_index);
 		}
 	}
 
@@ -951,6 +944,10 @@ void VoxelStreamSQLite::flush_cache() {
 	ERR_FAIL_COND(con == nullptr);
 	flush_cache_to_connection(con);
 	recycle_connection(con);
+}
+
+void VoxelStreamSQLite::flush() {
+	flush_cache();
 }
 
 // This function does not lock any mutex for internal use.

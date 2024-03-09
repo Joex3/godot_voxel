@@ -71,14 +71,19 @@ public:
 	virtual void do_path(Span<const Vector3> positions, Span<const float> radii);
 
 	void sdf_stamp_erase(Ref<gd::VoxelBuffer> stamp, Vector3i pos);
+	void sdf_stamp_erase(const VoxelBufferInternal &stamp, Vector3i pos);
 
 	virtual void copy(Vector3i pos, VoxelBufferInternal &dst, uint8_t channels_mask) const;
 	void copy(Vector3i pos, Ref<gd::VoxelBuffer> dst, uint8_t channels_mask) const;
-	virtual void paste(Vector3i pos, Ref<gd::VoxelBuffer> p_voxels, uint8_t channels_mask);
+
+	virtual void paste(Vector3i pos, const VoxelBufferInternal &src, uint8_t channels_mask);
+	void paste(Vector3i pos, Ref<gd::VoxelBuffer> p_voxels, uint8_t channels_mask);
+
 	virtual void paste_masked(Vector3i pos, Ref<gd::VoxelBuffer> p_voxels, uint8_t channels_mask, uint8_t mask_channel,
 			uint64_t mask_value);
 
 	void smooth_sphere(Vector3 sphere_center, float sphere_radius, int blur_radius);
+	void grow_sphere(Vector3 sphere_center, float sphere_radius, float strength);
 
 	virtual Ref<VoxelRaycastResult> raycast(Vector3 pos, Vector3 dir, float max_distance, uint32_t collision_mask);
 

@@ -49,8 +49,11 @@ public:
 		Vector3i position;
 		// TODO Rename lod_index
 		uint8_t lod;
-		// Tells if the mesh resource was built as part of the task. If not, you need to build it on the main thread.
+		// Tells if the mesh resource was built as part of the task. If not, you need to build it on the main thread if
+		// it is needed.
 		bool has_mesh_resource;
+		// Tells if the meshing task was required to build a rendering mesh if possible.
+		bool visual_was_required;
 		// Can be null. Attached to meshing output so it is tracked more easily, because it is baked asynchronously
 		// starting from the mesh task, and it might complete earlier or later than the mesh.
 		std::shared_ptr<DetailTextureOutput> detail_textures;
@@ -74,7 +77,10 @@ public:
 		bool max_lod_hint;
 		// Blocks with this flag set should not be ignored.
 		// This is used when data streaming is off, all blocks are loaded at once.
+		// TODO Unused?
 		bool initial_load;
+		bool had_instances;
+		bool had_voxels;
 	};
 
 	struct BlockDetailTextureOutput {
@@ -362,43 +368,6 @@ struct VoxelFileLockerWrite {
 	}
 
 	std::string _path;
-};
-
-// Helper class to store tasks and schedule them in a single batch
-class BufferedTaskScheduler {
-public:
-	static BufferedTaskScheduler &get_for_current_thread();
-
-	inline void push_main_task(IThreadedTask *task) {
-		_main_tasks.push_back(task);
-	}
-
-	inline void push_io_task(IThreadedTask *task) {
-		_io_tasks.push_back(task);
-	}
-
-	inline size_t get_main_count() const {
-		return _main_tasks.size();
-	}
-
-	inline size_t get_io_count() const {
-		return _io_tasks.size();
-	}
-
-	void flush();
-
-	// No destructor! This does not take ownership, it is only a helper. Flush should be called after each use.
-
-private:
-	BufferedTaskScheduler();
-
-	bool has_tasks() const {
-		return _main_tasks.size() > 0 || _io_tasks.size() > 0;
-	}
-
-	std::vector<IThreadedTask *> _main_tasks;
-	std::vector<IThreadedTask *> _io_tasks;
-	Thread::ID _thread_id;
 };
 
 } // namespace zylann::voxel

@@ -13,32 +13,32 @@ namespace {
 std::atomic_int g_debug_save_block_tasks_count = { 0 };
 }
 
-SaveBlockDataTask::SaveBlockDataTask(VolumeID p_volume_id, Vector3i p_block_pos, uint8_t p_lod, uint8_t p_block_size,
+SaveBlockDataTask::SaveBlockDataTask(VolumeID p_volume_id, Vector3i p_block_pos, uint8_t p_lod,
 		std::shared_ptr<VoxelBufferInternal> p_voxels, std::shared_ptr<StreamingDependency> p_stream_dependency,
-		std::shared_ptr<AsyncDependencyTracker> p_tracker) :
+		std::shared_ptr<AsyncDependencyTracker> p_tracker, bool flush_on_last_tracked_task) :
 		_voxels(p_voxels),
 		_position(p_block_pos),
 		_volume_id(p_volume_id),
 		_lod(p_lod),
-		_block_size(p_block_size),
 		_save_instances(false),
 		_save_voxels(true),
+		_flush_on_last_tracked_task(flush_on_last_tracked_task),
 		_stream_dependency(p_stream_dependency),
 		_tracker(p_tracker) {
 	//
 	++g_debug_save_block_tasks_count;
 }
 
-SaveBlockDataTask::SaveBlockDataTask(VolumeID p_volume_id, Vector3i p_block_pos, uint8_t p_lod, uint8_t p_block_size,
+SaveBlockDataTask::SaveBlockDataTask(VolumeID p_volume_id, Vector3i p_block_pos, uint8_t p_lod,
 		UniquePtr<InstanceBlockData> p_instances, std::shared_ptr<StreamingDependency> p_stream_dependency,
-		std::shared_ptr<AsyncDependencyTracker> p_tracker) :
+		std::shared_ptr<AsyncDependencyTracker> p_tracker, bool flush_on_last_tracked_task) :
 		_instances(std::move(p_instances)),
 		_position(p_block_pos),
 		_volume_id(p_volume_id),
 		_lod(p_lod),
-		_block_size(p_block_size),
 		_save_instances(true),
 		_save_voxels(false),
+		_flush_on_last_tracked_task(flush_on_last_tracked_task),
 		_stream_dependency(p_stream_dependency),
 		_tracker(p_tracker) {
 	//
@@ -76,8 +76,7 @@ void SaveBlockDataTask::run(zylann::ThreadedTaskContext &ctx) {
 		// request
 		_voxels->duplicate_to(voxels_copy, true);
 		_voxels = nullptr;
-		const Vector3i origin_in_voxels = (_position << _lod) * _block_size;
-		VoxelStream::VoxelQueryData q{ voxels_copy, origin_in_voxels, _lod, VoxelStream::RESULT_ERROR };
+		VoxelStream::VoxelQueryData q{ voxels_copy, _position, _lod, VoxelStream::RESULT_ERROR };
 		stream->save_voxel_block(q);
 	}
 
@@ -95,6 +94,10 @@ void SaveBlockDataTask::run(zylann::ThreadedTaskContext &ctx) {
 	}
 
 	if (_tracker != nullptr) {
+		if (_flush_on_last_tracked_task && _tracker->get_remaining_count() == 1) {
+			// This was the last task in a tracked group of saving tasks, we may flush now
+			stream->flush();
+		}
 		_tracker->post_complete();
 	}
 
@@ -122,6 +125,8 @@ void SaveBlockDataTask::apply_result() {
 			o.dropped = !_has_run;
 			o.max_lod_hint = false; // Unused
 			o.initial_load = false; // Unused
+			o.had_instances = _save_instances;
+			o.had_voxels = _save_voxels;
 			o.type = VoxelEngine::BlockDataOutput::TYPE_SAVED;
 
 			VoxelEngine::VolumeCallbacks callbacks = VoxelEngine::get_singleton().get_volume_callbacks(_volume_id);

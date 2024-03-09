@@ -89,6 +89,10 @@ public:
 
 	void set_full_load_completed(bool complete);
 
+	inline bool is_full_load_completed() const {
+		return _full_load_completed;
+	}
+
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Voxel queries.
 	// When not specified, the used LOD index is 0.
@@ -121,6 +125,7 @@ public:
 	// Every block intersecting with the box at every LOD will be checked.
 	// This function runs sequentially and should be thread-safe. May be used if blocks are immediately needed.
 	// It will block if other threads are accessing the same data.
+	// When streaming is enabled, non-loaded areas will not be touched.
 	// WARNING: this does not check if the area is editable.
 	void pre_generate_box(Box3i voxel_box);
 
@@ -199,8 +204,13 @@ public:
 	// This is mainly used for debugging so it isn't optimal, don't use this if you plan to query many blocks.
 	bool has_block(Vector3i bpos, unsigned int lod_index) const;
 
-	// Tests if all blocks in a LOD0 area are loaded. If any isn't, returns false. Otherwise, returns true.
-	bool has_all_blocks_in_area(Box3i data_blocks_box) const;
+	// Tests if all blocks in an area are loaded. If any isn't, returns false. Otherwise, returns true.
+	// Accounts for data boundaries, but is slower as a result.
+	bool has_all_blocks_in_area(Box3i data_blocks_box, unsigned int lod_index) const;
+
+	// Tests if all blocks in an area are loaded. If any isn't, returns false. Otherwise, returns true.
+	// Doesn't account for data boundaries, so if the given box overlaps outside, it will return false.
+	bool has_all_blocks_in_area_unbound(Box3i data_blocks_box, unsigned int lod_index) const;
 
 	// Gets the total amount of allocated blocks. This includes blocks having no voxel data.
 	unsigned int get_block_count() const;
@@ -281,13 +291,20 @@ public:
 	// Increases the reference count of loaded blocks in the area.
 	// Returns positions where blocks were loaded, and where they were missing.
 	// Shallow copies of found blocks are returned (voxel data is referenced).
-	void view_area(Box3i blocks_box, std::vector<Vector3i> &missing_blocks,
-			std::vector<Vector3i> &found_blocks_positions, std::vector<VoxelDataBlock> &found_blocks);
+	// Should only be used if refcounting is used, may fail otherwise.
+	void view_area(Box3i blocks_box, unsigned int lod_index, std::vector<Vector3i> *missing_blocks,
+			std::vector<Vector3i> *found_blocks_positions, std::vector<VoxelDataBlock> *found_blocks);
 
 	// Decreases the reference count of loaded blocks in the area. Blocks reaching zero will be unloaded.
 	// Returns positions where blocks were unloaded, and where they were missing.
 	// If `to_save` is not null and some unloaded blocks contained modifications, their data will be returned too.
-	void unview_area(Box3i blocks_box, std::vector<Vector3i> &missing_blocks, std::vector<Vector3i> &removed_blocks,
+	// Should only be used if refcounting is used, may fail otherwise.
+	void unview_area(Box3i blocks_box, unsigned int lod_index,
+			// Blocks that actually got removed (some areas can have no block)
+			std::vector<Vector3i> *removed_blocks,
+			// Missing blocks are used in case the caller has a collection of loading blocks, so it can cancel them
+			std::vector<Vector3i> *missing_blocks,
+			// Blocks to save are those that had unsaved modifications
 			std::vector<BlockToSave> *to_save);
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -304,11 +321,11 @@ private:
 		// Storage for edited and cached voxels.
 		VoxelDataMap map;
 
-		// If the map and spatial locks have to be both locked at a given moment, it must be done in the following order
-		// to avoid deadlocks:
+		// Multi-threaded access strategy:
 		// - Spatial lock first
-		// - Map lock second, while the spatial lock is acquired
-		// If two lods need really need to be locked as well, lock the lower index first, and higher index next.
+		// - Map lock second, while the spatial lock is acquired, just to lookup the map
+		// This should be safe assuming the address of hashmap's values remains stable when insertion or removal occurs.
+		// If two lods really need to be locked as well, lock the lower index first, and higher index next.
 
 		// Lock protecting the map itself, because it uses a hashmap.
 		// This lock should be locked in write mode only when the map gets modified (adding or removing blocks).
@@ -328,8 +345,12 @@ private:
 		RWLockRead rlock(data_lod.map_lock);
 		const VoxelDataBlock *block = data_lod.map.get_block(block_pos);
 		if (block == nullptr) {
+			// The block is not there, so unless streaming is not enabled, we don't know if it has edits or not.
 			return nullptr;
 		}
+
+		// The block is there, so we know if it has edits or not.
+
 		// TODO Thread-safety: this checking presence of voxels is not safe.
 		// It can change while meshing takes place if a modifier is moved in the same area,
 		// because it invalidates cached data (that doesn't require locking the map, and doesn't lock a VoxelBuffer,

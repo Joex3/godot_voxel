@@ -6,6 +6,10 @@
 #include "../../util/godot/classes/node_3d.h"
 #include "../voxel_modifier.h"
 
+#ifdef TOOLS_ENABLED
+#include "../../util/godot/core/version.h"
+#endif
+
 namespace zylann::voxel {
 namespace gd {
 

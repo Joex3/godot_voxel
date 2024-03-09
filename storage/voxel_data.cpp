@@ -298,10 +298,10 @@ void VoxelData::copy(Vector3i min_pos, VoxelBufferInternal &dst_buffer, unsigned
 	const Box3i blocks_box = Box3i(min_pos, dst_buffer.get_size()).downscaled(data_lod0.map.get_block_size());
 	SpatialLock3D::Read srlock(data_lod0.spatial_lock, BoxBounds3i(blocks_box));
 
-	if (is_streaming_enabled() || generator.is_null()) {
+	if (generator.is_null()) {
 		RWLockRead rlock(data_lod0.map_lock);
 		// Only gets blocks we have voxel data of. Other blocks will be air.
-		// TODO Maybe in the end we should just do the same in either case?
+		// TODO Modifiers?
 		data_lod0.map.copy(min_pos, dst_buffer, channels_mask);
 
 	} else {
@@ -311,6 +311,11 @@ void VoxelData::copy(Vector3i min_pos, VoxelBufferInternal &dst_buffer, unsigned
 		};
 
 		GenContext gctx{ **generator, modifiers };
+
+		// Note, when streaming is enabled and this intersects non-loaded areas, they will fallback on the generator.
+		// That's technically not correct as we don't really know what these areas should contain, they could have been
+		// edited. It may be useful for the caller to check first if the area is loaded. It would be better if all this
+		// could be done in a single transaction? Might need a proper transaction API eventually
 
 		RWLockRead rlock(data_lod0.map_lock);
 		data_lod0.map.copy(min_pos, dst_buffer, channels_mask, &gctx,
@@ -399,8 +404,8 @@ void VoxelData::pre_generate_box(Box3i voxel_box, Span<Lod> lods, unsigned int d
 	// TODO Optimize: thread_local pooling?
 	std::vector<Task> todo;
 	// We'll pack tasks per LOD so we'll have less locking to do
-	// TODO Optimize: thread_local pooling?
-	std::vector<unsigned int> count_per_lod;
+	FixedArray<unsigned int, constants::MAX_LOD> count_per_lod;
+	fill(count_per_lod, 0u);
 
 	// We could have locked all LODs for writing during the whole process.
 	// But in order to reduce the amount of locking and time being locked, we only lock them one by one for reading
@@ -440,7 +445,7 @@ void VoxelData::pre_generate_box(Box3i voxel_box, Span<Lod> lods, unsigned int d
 			});
 		}
 
-		count_per_lod.push_back(todo.size() - prev_size);
+		count_per_lod[lod_index] = todo.size() - prev_size;
 	}
 
 	const Vector3i block_size = Vector3iUtil::create(data_block_size);
@@ -580,12 +585,19 @@ bool VoxelData::has_block(Vector3i bpos, unsigned int lod_index) const {
 	return data_lod.map.has_block(bpos);
 }
 
-bool VoxelData::has_all_blocks_in_area(Box3i data_blocks_box) const {
+bool VoxelData::has_all_blocks_in_area(Box3i data_blocks_box, unsigned int lod_index) const {
 	ZN_PROFILE_SCOPE();
-	const Box3i bounds_in_blocks = get_bounds().downscaled(get_block_size());
+	// TODO get_bounds locks a mutex, it may be better for all callers to prefer the unbound version and clip
+	// themselves, especially when doing this many times
+	const Box3i bounds_in_blocks = get_bounds().downscaled(get_block_size() << lod_index);
 	data_blocks_box = data_blocks_box.clipped(bounds_in_blocks);
 
-	const Lod &data_lod = _lods[0];
+	return has_all_blocks_in_area_unbound(data_blocks_box, lod_index);
+}
+
+bool VoxelData::has_all_blocks_in_area_unbound(Box3i data_blocks_box, unsigned int lod_index) const {
+	// ZN_PROFILE_SCOPE();
+	const Lod &data_lod = _lods[lod_index];
 	RWLockRead rlock(data_lod.map_lock);
 
 	return data_blocks_box.all_cells_match([&data_lod](Vector3i bpos) { //
@@ -960,13 +972,15 @@ bool VoxelData::has_blocks_with_voxels_in_area_broad_mip_test(Box3i box_in_voxel
 	return true;
 }
 
-void VoxelData::view_area(Box3i blocks_box, std::vector<Vector3i> &missing_blocks,
-		std::vector<Vector3i> &found_blocks_positions, std::vector<VoxelDataBlock> &found_blocks) {
+void VoxelData::view_area(Box3i blocks_box, unsigned int lod_index, std::vector<Vector3i> *missing_blocks,
+		std::vector<Vector3i> *found_blocks_positions, std::vector<VoxelDataBlock> *found_blocks) {
 	ZN_PROFILE_SCOPE();
+	ZN_ASSERT_RETURN(lod_index < _lods.size());
+
 	const Box3i bounds_in_blocks = get_bounds().downscaled(get_block_size());
 	blocks_box = blocks_box.clipped(bounds_in_blocks);
 
-	Lod &lod = _lods[0];
+	Lod &lod = _lods[lod_index];
 
 	// Locking for write because we are modifying states on blocks.
 	// TODO Could use atomics if contention is too much?
@@ -975,25 +989,31 @@ void VoxelData::view_area(Box3i blocks_box, std::vector<Vector3i> &missing_block
 	// Locking for read because we don't add or remove blocks.
 	RWLockRead rlock(lod.map_lock);
 
-	blocks_box.for_each_cell_zxy([&lod, &found_blocks_positions, &found_blocks, &missing_blocks](Vector3i bpos) {
+	blocks_box.for_each_cell_zxy([&lod, found_blocks_positions, found_blocks, &missing_blocks](Vector3i bpos) {
 		VoxelDataBlock *block = lod.map.get_block(bpos);
 		if (block != nullptr) {
 			block->viewers.add();
-			found_blocks.push_back(*block);
-			found_blocks_positions.push_back(bpos);
-		} else {
-			missing_blocks.push_back(bpos);
+			if (found_blocks != nullptr) {
+				found_blocks->push_back(*block);
+			}
+			if (found_blocks_positions != nullptr) {
+				found_blocks_positions->push_back(bpos);
+			}
+		} else if (missing_blocks != nullptr) {
+			missing_blocks->push_back(bpos);
 		}
 	});
 }
 
-void VoxelData::unview_area(Box3i blocks_box, std::vector<Vector3i> &missing_blocks,
-		std::vector<Vector3i> &removed_blocks, std::vector<BlockToSave> *to_save) {
+void VoxelData::unview_area(Box3i blocks_box, unsigned int lod_index, std::vector<Vector3i> *removed_blocks,
+		std::vector<Vector3i> *missing_blocks, std::vector<BlockToSave> *to_save) {
 	ZN_PROFILE_SCOPE();
+	ZN_ASSERT_RETURN(lod_index < _lods.size());
+
 	const Box3i bounds_in_blocks = get_bounds().downscaled(get_block_size());
 	blocks_box = blocks_box.clipped(bounds_in_blocks);
 
-	Lod &lod = _lods[0];
+	Lod &lod = _lods[lod_index];
 
 	// Locking for write because we are modifying states on blocks.
 	// TODO Could use atomics if contention is too much? However if we do, we need to ensure no other thread is holding
@@ -1003,7 +1023,7 @@ void VoxelData::unview_area(Box3i blocks_box, std::vector<Vector3i> &missing_blo
 	// Locking for write because we are potentially going to remove blocks from the map.
 	RWLockWrite wlock(lod.map_lock);
 
-	blocks_box.for_each_cell_zxy([&lod, &missing_blocks, &removed_blocks, to_save](Vector3i bpos) {
+	blocks_box.for_each_cell_zxy([&lod, missing_blocks, removed_blocks, to_save](Vector3i bpos) {
 		VoxelDataBlock *block = lod.map.get_block(bpos);
 		if (block != nullptr) {
 			block->viewers.remove();
@@ -1013,10 +1033,12 @@ void VoxelData::unview_area(Box3i blocks_box, std::vector<Vector3i> &missing_blo
 				} else {
 					lod.map.remove_block(bpos, BeforeUnloadSaveAction{ to_save, bpos, 0 });
 				}
-				removed_blocks.push_back(bpos);
+				if (removed_blocks != nullptr) {
+					removed_blocks->push_back(bpos);
+				}
 			}
-		} else {
-			missing_blocks.push_back(bpos);
+		} else if (missing_blocks != nullptr) {
+			missing_blocks->push_back(bpos);
 		}
 	});
 }

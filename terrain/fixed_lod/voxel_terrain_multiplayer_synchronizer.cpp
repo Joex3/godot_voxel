@@ -11,6 +11,10 @@
 #include "../../util/string_funcs.h"
 #include "voxel_terrain.h"
 
+#ifdef TOOLS_ENABLED
+#include "../../util/godot/core/packed_arrays.h"
+#endif
+
 namespace zylann::voxel {
 
 VoxelTerrainMultiplayerSynchronizer::VoxelTerrainMultiplayerSynchronizer() {
@@ -234,11 +238,19 @@ void VoxelTerrainMultiplayerSynchronizer::_b_receive_area(PackedByteArray messag
 
 #if defined(ZN_GODOT)
 PackedStringArray VoxelTerrainMultiplayerSynchronizer::get_configuration_warnings() const {
+	PackedStringArray warnings;
+	get_configuration_warnings(warnings);
+	return warnings;
+}
 #elif defined(ZN_GODOT_EXTENSION)
 PackedStringArray VoxelTerrainMultiplayerSynchronizer::_get_configuration_warnings() const {
-#endif
 	PackedStringArray warnings;
+	get_configuration_warnings(warnings);
+	return warnings;
+}
+#endif
 
+void VoxelTerrainMultiplayerSynchronizer::get_configuration_warnings(PackedStringArray &warnings) const {
 	if (is_inside_tree()) {
 		if (_terrain == nullptr) {
 			warnings.append(ZN_TTR("This node must be child of {0}").format(varray(VoxelTerrain::get_class_static())));
@@ -255,8 +267,6 @@ PackedStringArray VoxelTerrainMultiplayerSynchronizer::_get_configuration_warnin
 			}
 		}
 	}
-
-	return warnings;
 }
 
 #endif
